@@ -27,21 +27,29 @@ def randomizeWeights(model):
 
 def trainAndMeasure(model, dataset, name):
     results = {}
+    models = []
 
-    EPOCHS = 100
+    EPOCHS = 1
     folds = 10
   
     lf = nn.MSELoss()
     kf = KFold(n_splits=folds)
 
-    tracker = CarbonTracker(epochs=EPOCHS, interpretable = False,
+    trainTracker = CarbonTracker(epochs=EPOCHS, interpretable = False,
                             update_interval= 1, epochs_before_pred=0,
                             monitor_epochs=EPOCHS)
-
+    
+    testTracker = CarbonTracker(epochs=EPOCHS, interpretable = False,
+                            update_interval= 1, epochs_before_pred=0,
+                            monitor_epochs=EPOCHS)
+    
     print('--------------------------------')
     for f, (testIds, trainIds) in enumerate(kf.split(dataset)):
-        print(f'FOLD {f}/{folds}')
+        print(f'MODEL {name}, FOLD {f}/{folds-1}')
         print('--------------------------------')
+
+        trainSize = len(trainIds)
+        testSize = len(testIds)
 
         trainSampler = tutils.SubsetRandomSampler(trainIds)
         testSampler = tutils.SubsetRandomSampler(testIds)
@@ -49,70 +57,101 @@ def trainAndMeasure(model, dataset, name):
         trainLoader = tutils.DataLoader(dataset, sampler=trainSampler)
         testLoader = tutils.DataLoader(dataset, sampler=testSampler)
 
-        model.apply(randomizeWeights)
-        optimizer = torch.optim.Adam(model.parameters())
+        randomizedModels = []
 
-        for epoch in range(EPOCHS):
-            tracker.epoch_start()
+        for _ in range(3):
+            model.apply(randomizeWeights)
+            optimizer = torch.optim.Adam(model.parameters())
 
-            print(f'\nStarting epoch {epoch+1}/{EPOCHS}\n')
-            currentLoss = 0.0
+            for epoch in range(EPOCHS):
+                trainTracker.epoch_start()
 
-            for i, data in enumerate(trainLoader, 0):         
-                inputs, targets = data
+                print(f'\nStarting epoch {epoch+1}/{EPOCHS}\n')
 
-                optimizer.zero_grad()
+                currentLoss = 0.0
+                epochPSNR = 0
 
-                outputs = model(inputs)
+                for i, data in enumerate(trainLoader, 0):         
+                    input, target = data
 
-                loss = lf(outputs, targets)
-                loss.backward()
+                    optimizer.zero_grad()
+
+                    outputs = model(input)
+
+                    loss = lf(outputs, target)
+                    loss.backward()
+
+                    epochPSNR += PSNR(target.numpy(), output.numpy())
+                    
+                    optimizer.step()
+
+                    currentLoss += loss.item()
+                    if (i+1) % (trainSize/10) == 0:
+                        print('Loss after mini-batch %2d/10: %.3f' %((i+1)/(trainSize/10), currentLoss / (trainSize/10)))
+                        currentLoss = 0.0
+
                 
-                optimizer.step()
+                
+                trainTracker.epoch_end()
 
-                currentLoss += loss.item()
-                if i % 20 == 19:
-                    print('Loss after mini-batch %5d: %.3f' %(i + 1, currentLoss / 20))
-                    currentLoss = 0.0
-            
-            tracker.epoch_end()
+            randomizedModels.append(model)
 
-        # Save each fold
-        print('Training process has finished. Saving trained model.')
+        models.append(model)
 
-        savePath = f'./{name}-fold-{f}.pth'
-        torch.save(model.state_dict(), savePath)
+        # # Save each fold
+        # print('\nTraining process has finished. Saving trained model.\n')
+
+        # savePath = f'./{name}-fold-{f}.pth'
+        # torch.save(model.state_dict(), savePath)
         
         # Start evaluation
-        print('Starting evaluation')
+        print('\nStarting evaluation\n')
 
         totalPSNR, currentPSNR = 0, 0
         with torch.no_grad():
             for i, data in enumerate(testLoader, 0):
+                if (i+1) % (testSize/10) == 0:
+                    print('PSNR after mini-batch %2d/10: %.3f dB' %((i+1)/(testSize/10), totalPSNR / (i+1)))
+
                 input, target = data
                 output = model(input)
 
-                currentPSNR = PSNR(target, output)
-                totalPSNR = totalPSNR + currentPSNR
+                currentPSNR = PSNR(target.numpy(), output.numpy())
+                totalPSNR += currentPSNR
             
-            avgPSNR = totalPSNR / i
+            avgPSNR = totalPSNR / testSize
 
-            print(f"Average PSNR for fold {f}: {avgPSNR} dB")
+            print("\nFold %s: %.3f dB\n" % (f, avgPSNR))
             print('--------------------------------')
             results[f] = avgPSNR
     
-    print(f"K-FOLD CROSS VALIDATION RESULTS FOR {folds} FOLDS")
+    trainTracker.stop()
+    testTracker.stop()
+
+    print(f"MODEL {name}: K-FOLD CROSS VALIDATION RESULTS FOR {folds} FOLDS")
     print('--------------------------------')
 
     sum = 0.0
+    topValue = 0
+    topKey = 0
 
     for key, value in results.items():
-        print(f"Fold {key}: {value} dB")
+        print("Fold %s: %.3f dB" % (key, value))
+
+        if value > topValue:
+            topValue = value
+            topKey = key
+
         sum += value
     
-    print(f"Avg: {sum/len(results.items())} dB")
+    print("Avg: %.3f dB" % (sum/len(results.items())))
+    print("Max: %.3f dB (Fold %s)" % (topValue, topKey))
 
-    tracker.stop()
+    # Save best model
+    print('Saving best model.\n')
+
+    savePath = f'./{name}-fold-{topKey}.pth'
+    torch.save(models[topKey].state_dict(), savePath)
 
 def main():
     # Load training dataset
