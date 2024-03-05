@@ -3,6 +3,8 @@ from fastonn import SelfONN2d
 
 class ONN(nn.Module):
     def __init__(self, in_nc=1, out_nc=1, nc=12) -> None:
+        super(ONN, self).__init__()
+
         bias = True
 
         model_head = nn.Sequential(

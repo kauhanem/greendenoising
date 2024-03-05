@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.utils.data as tutils
-from fastonn import SelfONN2d
 
 from noisyds import NoisyDataset
 
 from sklearn.model_selection import KFold
 from skimage.metrics import peak_signal_noise_ratio as PSNR
-from skimage.io import imshow, imshow_collection
+from skimage.io import imshow, imshow_collection, show
 
+from fastonn import SelfONN2d
 from dncnn import DnCNN
 from scnn import sCNN
 from onn import ONN
@@ -17,35 +17,37 @@ from carbontracker.tracker import CarbonTracker
 
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image
 import glob
 
 def randomizeWeights(model):
     if isinstance(model, nn.Conv2d) or isinstance(model, SelfONN2d):
-        print(f'Xavier initializing trainable parameters of layer = {model}')
+        # print(f'Xavier initializing trainable parameters of layer = {model}')
         nn.init.xavier_uniform_(model.weight)
 
-def trainAndMeasure(model, dataset, name):
+def trainAndMeasure(model, dataset, name, epochs=100, folds=10):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = model.to(device)
+
     results = {}
     models = []
-
-    EPOCHS = 1
-    folds = 10
   
     lf = nn.MSELoss()
     kf = KFold(n_splits=folds)
 
-    trainTracker = CarbonTracker(epochs=EPOCHS, interpretable = False,
-                            update_interval= 1, epochs_before_pred=0,
-                            monitor_epochs=EPOCHS)
+    trainTracker = CarbonTracker(epochs = 1, interpretable = False,
+                            update_interval = 1, epochs_before_pred=0,
+                            monitor_epochs = 1, verbose=0)
     
-    testTracker = CarbonTracker(epochs=EPOCHS, interpretable = False,
-                            update_interval= 1, epochs_before_pred=0,
-                            monitor_epochs=EPOCHS)
+    #evalTracker = CarbonTracker(epochs=EPOCHS, interpretable = False,
+    #                        update_interval= 1, epochs_before_pred=0,
+    #                        monitor_epochs=EPOCHS)
+
+    optimizer = torch.optim.Adam(model.parameters())
     
     print('--------------------------------')
-    for f, (testIds, trainIds) in enumerate(kf.split(dataset)):
-        print(f'MODEL {name}, FOLD {f}/{folds-1}')
+    for f, (testIds, trainIds) in enumerate(kf.split(dataset), 1):
+        print(f'MODEL {name}, FOLD {f}/{folds}')
         print('--------------------------------')
 
         trainSize = len(trainIds)
@@ -56,17 +58,19 @@ def trainAndMeasure(model, dataset, name):
 
         trainLoader = tutils.DataLoader(dataset, sampler=trainSampler)
         testLoader = tutils.DataLoader(dataset, sampler=testSampler)
+        
+        bestPSNR = 0
 
-        randomizedModels = []
+        trainTracker.epoch_start()
 
-        for _ in range(3):
-            model.apply(randomizeWeights)
-            optimizer = torch.optim.Adam(model.parameters())
+        for r in range(3):
+            modelRand = model.apply(randomizeWeights)
 
-            for epoch in range(EPOCHS):
-                trainTracker.epoch_start()
+            psnrPerEpoch = []
 
-                print(f'\nStarting epoch {epoch+1}/{EPOCHS}\n')
+            for epoch in range(epochs):
+
+                print(f'\nInitialization {r+1}/3, starting epoch {epoch+1}/{epochs}\n')
 
                 currentLoss = 0.0
                 epochPSNR = 0
@@ -74,49 +78,62 @@ def trainAndMeasure(model, dataset, name):
                 for i, data in enumerate(trainLoader, 0):         
                     input, target = data
 
+                    input = input.to(device)
+                    target = target.to(device)
+
                     optimizer.zero_grad()
 
-                    outputs = model(input)
+                    output = modelRand(input).to(device)
 
-                    loss = lf(outputs, target)
+                    loss = lf(output, target)
                     loss.backward()
 
-                    epochPSNR += PSNR(target.numpy(), output.numpy())
-                    
                     optimizer.step()
 
                     currentLoss += loss.item()
+                    
+                    epochPSNR += PSNR(target.cpu().detach().numpy(), output.cpu().detach().numpy())
+               
                     if (i+1) % (trainSize/10) == 0:
-                        print('Loss after mini-batch %2d/10: %.3f' %((i+1)/(trainSize/10), currentLoss / (trainSize/10)))
+                        print('After mini-batch %2d/10, loss %.3f, PSNR: %.3f dB'
+                               % ((i+1)/(trainSize/10), currentLoss / (trainSize/10), epochPSNR / (i+1)))
                         currentLoss = 0.0
 
+                        if epoch == epochs-1:
+                            imshow_collection([input.cpu().detach().squeeze(),
+                                                output.cpu().detach().squeeze(),
+                                                target.cpu().detach().squeeze()],
+                                                cmap="gray")
+                            show()
                 
-                
-                trainTracker.epoch_end()
+                psnrPerEpoch.append(epochPSNR / trainSize)
+            
+            if psnrPerEpoch[-1] > bestPSNR:
+                bestPSNR = psnrPerEpoch[-1]
+                bestModel = (modelRand, psnrPerEpoch, r+1)
 
-            randomizedModels.append(model)
+        models.append(bestModel)
 
-        models.append(model)
+        trainTracker.epoch_end()
 
-        # # Save each fold
-        # print('\nTraining process has finished. Saving trained model.\n')
-
-        # savePath = f'./{name}-fold-{f}.pth'
-        # torch.save(model.state_dict(), savePath)
-        
         # Start evaluation
-        print('\nStarting evaluation\n')
+        print(f'\nStarting evaluation on best randomized model {bestModel[2]}/3\n')
 
         totalPSNR, currentPSNR = 0, 0
         with torch.no_grad():
+
             for i, data in enumerate(testLoader, 0):
                 if (i+1) % (testSize/10) == 0:
-                    print('PSNR after mini-batch %2d/10: %.3f dB' %((i+1)/(testSize/10), totalPSNR / (i+1)))
+                    print('After mini-batch %2d/10, PSNR: %.3f dB' %((i+1)/(testSize/10), totalPSNR / (i+1)))
 
                 input, target = data
-                output = model(input)
 
-                currentPSNR = PSNR(target.numpy(), output.numpy())
+                input = input.to(device)
+                target = target.to(device)
+
+                output = bestModel[0](input)
+
+                currentPSNR = PSNR(target.cpu().detach().numpy(), output.cpu().detach().numpy())
                 totalPSNR += currentPSNR
             
             avgPSNR = totalPSNR / testSize
@@ -125,48 +142,40 @@ def trainAndMeasure(model, dataset, name):
             print('--------------------------------')
             results[f] = avgPSNR
     
-    trainTracker.stop()
-    testTracker.stop()
 
     print(f"MODEL {name}: K-FOLD CROSS VALIDATION RESULTS FOR {folds} FOLDS")
     print('--------------------------------')
 
     sum = 0.0
-    topValue = 0
-    topKey = 0
 
     for key, value in results.items():
         print("Fold %s: %.3f dB" % (key, value))
-
-        if value > topValue:
-            topValue = value
-            topKey = key
-
         sum += value
     
-    print("Avg: %.3f dB" % (sum/len(results.items())))
-    print("Max: %.3f dB (Fold %s)" % (topValue, topKey))
+    print("\nAvg: %.3f dB" % (sum/len(results.items())))
 
     # Save best model
-    print('Saving best model.\n')
+    print("\nSaving all folds' models")
 
-    savePath = f'./{name}-fold-{topKey}.pth'
-    torch.save(models[topKey].state_dict(), savePath)
+    for i,m in enumerate(models, 1):
+        savePath = f'./{name}-fold-{i}.pth'
+        torch.save(m[0].state_dict(), savePath)
+
+    return models
 
 def main():
     # Load training dataset
     path = "Train/1/"
     data = NoisyDataset(path)
 
-    # TODO: sCNN model training
-    modelShallow = sCNN()
-    resultsShallow = trainAndMeasure(modelShallow, data, "shallowCNN")
+    #modelShallow = sCNN()
+    #resultsShallow = trainAndMeasure(modelShallow, data, "shallowCNN")
 
-    # modelDeep = DnCNN()
-    # resultsShallow = trainAndMeasure(modelDeep, data, "deepCNN")
+    modelDeep = DnCNN()
+    resultsDeep = trainAndMeasure(modelDeep, data, "deepCNN")
 
     # modelONN = ONN()
-    # resultsShallow = trainAndMeasure(modelONN, data, "ONN")
+    # resultsONN = trainAndMeasure(modelONN, data, "ONN")
 
     # # Load testing dataset
     # noisyPath8 = "test/8/imp"

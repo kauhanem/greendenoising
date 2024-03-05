@@ -10,6 +10,7 @@ class DnCNN(nn.Module):
             nn.Conv2d(in_channels=in_nc, out_channels=nc, kernel_size=3, stride=1, padding=1, bias=bias),
             nn.ReLU(inplace=True)
         )
+        
         bodyLayer = nn.Sequential(
             nn.Conv2d(in_channels=nc, out_channels=nc, kernel_size=3, stride=1, padding=1, bias=bias),
             nn.BatchNorm2d(nc, momentum=0.9, eps=1e-04, affine=True),
