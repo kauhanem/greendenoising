@@ -11,13 +11,12 @@ class DnCNN(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        bodyLayer = nn.Sequential(
-            nn.Conv2d(in_channels=nc, out_channels=nc, kernel_size=3, stride=1, padding=1, bias=bias),
-            nn.BatchNorm2d(nc, momentum=0.9, eps=1e-04, affine=True),
-            nn.ReLU(inplace=True)
-        )
+        body = []
 
-        body = [bodyLayer for _ in range(nb-2)]
+        for _ in range(nb-2):
+            body.append(nn.Conv2d(in_channels=nc, out_channels=nc, kernel_size=3, stride=1, padding=1, bias=bias))
+            body.append(nn.BatchNorm2d(nc, momentum=0.9, eps=1e-04, affine=True))
+            body.append(nn.ReLU(inplace=True))
 
         tail = nn.Sequential(
             nn.Conv2d(in_channels=nc, out_channels=out_nc, kernel_size=3, stride=1, padding=1, bias=bias)
