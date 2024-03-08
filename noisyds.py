@@ -18,16 +18,10 @@ class NoisyDataset(Dataset):
         return len(self.imNames)
     
     def __getitem__(self, i):
-        # if torch.is_tensor(i):
-            # i = i.tolist()
-
         noisyImName = os.path.join(self.imDir, "imp",
                                     self.imNames[i])
         truthImName = os.path.join(self.imDir, "org",
                                     self.imNames[i])
-
-        # noisyIm = img_as_float32(io.imread(noisyImName))
-        # truthIm = img_as_float32(io.imread(truthImName))
 
         noisyIm = convert_image_dtype(read_image(noisyImName), dtype=torch.float32)
         truthIm = convert_image_dtype(read_image(truthImName), dtype=torch.float32)
