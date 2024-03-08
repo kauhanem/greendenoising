@@ -13,6 +13,7 @@ from scnn import sCNN
 from onn import ONN
 
 from carbontracker.tracker import CarbonTracker
+from carbontracker import parser
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -51,11 +52,11 @@ def test(models, dataset, name, plots=5):
     outs = []
     pics = []
 
-    print('------------------------------------------------')
+    print('----------------------------------------------------------')
     print(f'STARTING MODEL {name} TESTING. START TIME: {datetime.now().strftime("%H.%M:%S")}')
     print(f"FOLDS {numModels} | TESTSET SIZE {testSize}")
     print(f"USING DEV: {torch.cuda.get_device_name(0)}")
-    print('------------------------------------------------')
+    print('----------------------------------------------------------')
 
     for m, model in enumerate(models, 0):
         modelStart = time()
@@ -72,7 +73,7 @@ def test(models, dataset, name, plots=5):
             for j, data in enumerate(testLoader, 1):
                 img, org = data
 
-                img, org = torch.unsqueeze(img.to(dev), 1), torch.unsqueeze(org.to(dev), 1)
+                img, org = img.to(dev), org.to(dev)
 
                 out = model(img).to(dev)
 
@@ -89,16 +90,16 @@ def test(models, dataset, name, plots=5):
 
         outs.append(modelOuts)
 
-        result[m] = testPSNR / testSize
+        result[m] = testPSNR / j
         print(f"PSNR: {result[m]:.2f} dB")
 
         elapsed = time() - modelStart
         modelTotal += elapsed
-        print(f"Model {m} execution took {elapsed/60:.2f} min (total {modelTotal/60:.2f} min)\n")
+        print(f"Model {m} testing took {elapsed/60:.2f} min (total {modelTotal/60:.2f} min)\n")
 
     return np.average(result), outs, pics
     
-def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, batch=1, inits=3):
+def train(model, dataset, name, experimentName, epochs=100, folds=10, batch=20, inits=3):
     if torch.cuda.is_available():
         dev = torch.device("cuda")
         workers = 20
@@ -116,31 +117,20 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
     print(f"USING DEV: {torch.cuda.get_device_name(0)}")
     print('----------------------------------------------------------')
 
-    metric = psnr(device=dev)
-
     model = model.to(dev)
 
-    lf = nn.MSELoss()
     kf = KFold(n_splits=folds)
+    lf = nn.MSELoss().to(dev)
     optimizer = torch.optim.Adam(model.parameters())
+    metric = psnr(device=dev)
 
     models = []
     PPEs = torch.zeros(folds, epochs)
-
-    carbontracker = CarbonTracker(epochs = 1, interpretable = False,
-                            update_interval = 1, epochs_before_pred=0,
-                            monitor_epochs = 1, verbose=0)
-    
-    # Start energy tracking
-    carbontracker.epoch_start()
     
     foldTotal = 0
-
+     
     for f, (validIds, trainIds) in enumerate(kf.split(dataset), 1):
         foldStart = time()
-
-        trainSize = len(trainIds)
-        validSize = len(validIds)
 
         trainSampler = tutils.SubsetRandomSampler(trainIds)
         validSampler = tutils.SubsetRandomSampler(validIds)
@@ -152,9 +142,9 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
                                         batch_size=batch, num_workers=workers,
                                         pin_memory=pinMem)
         
-        bestPSNR = 0
+        bestPSNR = -1
 
-        # Train and evaluate n Xavier initialized models
+        # Train and evaluate n=inits Xavier initialized models
         for r in range(inits):
             modelRand = model.apply(xavierInit)
 
@@ -174,7 +164,7 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
                 for i, data in enumerate(trainLoader, 1):         
                     img, org = data
 
-                    img, org = torch.unsqueeze(img.to(dev), 1), torch.unsqueeze(org.to(dev), 1)
+                    img, org = img.to(dev), org.to(dev)
 
                     optimizer.zero_grad()
 
@@ -187,7 +177,7 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
 
                     totalLoss += loss.item()
                     
-                print(f"Loss: {totalLoss/trainSize:.3f}")
+                print(f"Loss: {totalLoss/i:.3f}")
                 
                 # Validation
                 modelRand.eval()
@@ -197,14 +187,14 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
                     for i, data in enumerate(validLoader, 1):
                         img, org = data
 
-                        img, org = torch.unsqueeze(img.to(dev), 1), torch.unsqueeze(org.to(dev), 1)
+                        img, org = img.to(dev), org.to(dev)
 
                         out = modelRand(img).to(dev)
 
                         metric.update(out, org)
                         epochPSNR += metric.compute()
                        
-                avgPSNR = epochPSNR / validSize
+                avgPSNR = epochPSNR / i
 
                 print(f"PSNR {avgPSNR:.3f} dB")
                 psnrPerEpoch[epoch] = avgPSNR
@@ -212,7 +202,7 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
                 elapsed = time() - epochStart
                 epochTotal += elapsed
                 print(f"Execution took {elapsed/60:.2g} min (total {epochTotal/60:.2g} min)")
-            
+
             if psnrPerEpoch[-1] > bestPSNR:
                 bestPSNR = psnrPerEpoch[-1]
 
@@ -220,7 +210,7 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
                 bestPPE = psnrPerEpoch
                 bestInit = r+1
 
-        print(f"\nFold {f} best init: {bestInit}/3, PSNR: {bestPPE[-1]:.2f} dB")
+        print(f"\nFold {f} best init: {bestInit}/{inits}, PSNR: {bestPPE[-1]:.2f} dB")
 
         models.append(bestModel)
         PPEs[f-1] = bestPPE
@@ -229,11 +219,8 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
         foldTotal += elapsed
         print(f"Fold {f} execution took {elapsed/60:.2f} min (total {foldTotal/60:.2f} min)")
 
-    # End energy tracking
-    carbontracker.epoch_end()
-
-    print('----------------------------------------------------------')
-    print(f"MODEL {name}: K-FOLD CROSS VALIDATION RESULTS FOR {folds} FOLDS\n")
+    print('\n----------------------------------------------------------')
+    print(f"MODEL {name}: K-FOLD CROSS VALIDATION RESULTS FOR {folds} FOLDS:")
 
     for ifold in range(folds):
         print(f"Fold {ifold+1}: {PPEs[ifold][-1]:.2f} dB")
@@ -244,7 +231,7 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
     avgPSNRPerEpoch = torch.mean(PPEs, 0, True).numpy()[0]
     
     # Save all models
-    print("\nSaving all models\n")
+    print("\nSaving all folds' weights\n")
        
     for i,m in enumerate(models, 1):
         savePath = f'{experimentName}/{name}/fold{i}.pth'
@@ -252,51 +239,94 @@ def trainAndMeasure(model, dataset, name, experimentName, epochs=100, folds=10, 
  
     return models, avgPSNRPerEpoch
 
-def trainAndTest(model, name, experimentName, dataTrain, dataTest, quick, batchSize=1):
-    start = time()
-
+def trainAndTest(model, name, experimentName, dataTrain, dataTest, quick, batch=20):
     if not os.path.isdir(f"{experimentName}/{name}"):
         os.mkdir(f"{experimentName}/{name}")
+
+    if not os.path.isdir(f"{experimentName}/{name}/train"):
+        os.mkdir(f"{experimentName}/{name}/train")
+
+    if not os.path.isdir(f"{experimentName}/{name}/test"):
+        os.mkdir(f"{experimentName}/{name}/test")
+
+    trainTracker = CarbonTracker(epochs = 1, monitor_epochs = -1,
+                                  update_interval = 1, epochs_before_pred=0, verbose=0,
+                                  log_dir=f'{experimentName}/{name}/train', log_file_prefix=f"{name}")
     
+    testTracker = CarbonTracker(epochs = 1, monitor_epochs = -1,
+                                  update_interval = 1, epochs_before_pred=0, verbose=0,
+                                  log_dir=f'{experimentName}/{name}/test', log_file_prefix=f"{name}")
+    
+    start = time()
+
+    # Start training energy tracking
+    trainTracker.epoch_start()
+
     if quick:
-        models, trainPSNR = trainAndMeasure(model, dataTrain, name, experimentName, epochs=10, folds=2, batch=batchSize, inits=1)
+        models, trainPSNR = train(model, dataTrain, name, experimentName, batch=batch,
+                                            epochs=10, folds=2, inits=2)
     else:
-        models, trainPSNR = trainAndMeasure(model, dataTrain, name, experimentName, batch=batchSize)
+        models, trainPSNR = train(model, dataTrain, name, experimentName, batch=batch)
+    
+    # Stop training energy tracking
+    trainTracker.epoch_end()
+
+    trainEnd = time()
+    trainTime = trainEnd - start
+
+    print(f"MODEL {name} TRAINING TOOK {(trainTime)/60:.2f} MIN\n")
+
+    # Start testing energy tracking
+    testTracker.epoch_start()
 
     testPSNR, testOuts, testPics = test(models, dataTest, name)
 
-    print(f"Model {name} execution took {(time()-start)/60:.2f} min\n")
+    # Stop testing energy tracking
+    testTracker.epoch_end()
+
+    testTime = time() - trainEnd
     
-    return trainPSNR, testPSNR, testOuts, testPics
+    print(f"MODEL {name} TESTING TOOK {(testTime)/60:.2f} MIN\n")
+    
+    return trainPSNR, trainTime, testPSNR, testOuts, testPics, testTime
 
 def main():
-    quick = False
+    quick = True
 
     scnn = True
     dncnn = True
     onn = True
 
-    experimentName = f"experiment_{datetime.now().strftime('%b%d_%H%M')}"
+    experimentName = f"experiments/{datetime.now().strftime('%Y-%-m-%-d-%H%M')}"
+    if not os.path.isdir("experiments"):
+        os.mkdir("experiments")
     if not os.path.isdir(experimentName):
         os.mkdir(experimentName)
 
     # Load training dataset
-    path = "Train/1/"
+    path = "Train/2/"
     dataTrain = NoisyDataset(path)
 
     # Load testing dataset
-    path = "Test/9/"
+    path = "Test/10/"
     dataTest = NoisyDataset(path)
     
     if quick:    
-        dataTrain = tutils.Subset(dataTrain, list(range(40)))
-        dataTest = tutils.Subset(dataTest, list(range(40)))
+        dataTrain = tutils.Subset(dataTrain, list(range(100)))
+        dataTest = tutils.Subset(dataTest, list(range(100)))
+
+    names = []
 
     trainPSNRs = []
-    energyUses = []
     testPSNRs = []
+    
     outs = []
-    names = []
+
+    trainEnergies = []
+    testEnergies = []
+    
+    trainTimes = []
+    testTimes = []
 
     # Shallow CNN
     if scnn:
@@ -304,12 +334,14 @@ def main():
         name = name + "q" if quick else name
         names.append(name)
 
-        trainPSNR, testPSNR, testOuts, testPics = trainAndTest(sCNN(), name, experimentName, dataTrain, dataTest, quick)
-        
+        trainPSNR, trainTime, testPSNR, testOuts, testPics, testTime = trainAndTest(sCNN(), name, experimentName,
+                                                               dataTrain, dataTest, quick)
+
         trainPSNRs.append(trainPSNR)
+        trainTimes.append(trainTime)
         testPSNRs.append(testPSNR)
         outs.append(testOuts)
-
+        testTimes.append(testTime)
 
     # Deep CNN
     if dncnn:
@@ -317,32 +349,40 @@ def main():
         name = name + "q" if quick else name
         names.append(name)
 
-        trainPSNR, testPSNR, testOuts, testPics = trainAndTest(DnCNN(), name, experimentName, dataTrain, dataTest, quick, batchSize=20)
+        trainPSNR, trainTime, testPSNR, testOuts, testPics, testTime = trainAndTest(DnCNN(), name, experimentName,
+                                                               dataTrain, dataTest, quick)
 
         trainPSNRs.append(trainPSNR)
+        trainTimes.append(trainTime)
         testPSNRs.append(testPSNR)
         outs.append(testOuts)
+        testTimes.append(testTime)
   
-    # Fast ONN
+    # SelfONN
     if onn:
         name = "ONN"
         name = name + "q" if quick else name
         names.append(name)
 
-        trainPSNR, testPSNR, testOuts, testPics = trainAndTest(ONN(), name, experimentName, dataTrain, dataTest, quick)
+        trainPSNR, trainTime, testPSNR, testOuts, testPics, testTime = trainAndTest(ONN(), name, experimentName,
+                                                               dataTrain, dataTest, quick)
         
         trainPSNRs.append(trainPSNR)
+        trainTimes.append(trainTime)
         testPSNRs.append(testPSNR)
         outs.append(testOuts)
+        testTimes.append(testTime)
 
     # Results plotting
-        
+    print(f"Plotting and printing test images of models {names}")
+
     # Print test images
-    numPics = len(outs)+2
+    numModels = len(names)
+    numPics = numModels+2
     numFolds = len(outs[0])
 
     for f in range(numFolds):
-        figImg = plt.figure(figsize=(8,6))
+        figImg = plt.figure(figsize=(8,8))
         plt.axis("off")
         
         for r in range(5):
@@ -358,7 +398,7 @@ def main():
                 plt.title("Truth")
             plt.imshow(testPics[r][1], cmap="gray")
 
-            for m in range(numPics-2):
+            for m in range(numModels):
                 figImg.add_subplot(5, numPics, m + 2 + r*numPics)
                 plt.axis("off")
                 if r == 0:
@@ -370,13 +410,17 @@ def main():
                 hspace=0
             )
 
-        plt.savefig(f"{experimentName}/images_fold{f+1}.png", bbox_inches='tight', dpi=300)
+        figImg.savefig(f"{experimentName}/images_fold{f+1}.png", bbox_inches='tight', dpi=300)
         
     # Plot PSNR per epoch
-    e = list(range(1, len(trainPSNR)+1))
-    col = ['b','r','k']
+    print(f"Plotting and printing PSNR per epoch of models {names}")
 
-    figPlot = plt.figure(figsize=(8,6))
+    e = np.arange(1, len(trainPSNR)+1)
+
+    col1 = ['darkorange','darkred','darkgreen']
+    col2 = ['bisque','red','lightgreen']
+
+    figPlot = plt.figure(figsize=(8,8))
     plt.title(f"Impulse Denoising")
 
     plt.ylabel(f"PSNR (dB)")
@@ -386,17 +430,84 @@ def main():
 
     legend = []
 
-    for m,y in enumerate(trainPSNRs,0):
-        plt.plot(e, y, col[m])
+    for m, y in enumerate(trainPSNRs, 0):
+        plt.plot(e, y, color=col1[m])
         legend.append(f"[{y[-1]:.2f} dB] {names[m]} Training")
     
-    for m,p in enumerate(testPSNRs,0):
-        plt.plot(len(y), p, col[m] + 'x')
+    for m, p in enumerate(testPSNRs, 0):
+        plt.plot(len(y), p, color=col1[m], marker='x')
         legend.append(f"[{p:.2f} dB] {names[m]} Test")
+
+    plt.xticks(e, e)
 
     plt.legend(legend)
 
-    plt.savefig(f"{experimentName}/PSNR_plots.png", bbox_inches='tight', dpi=300)
+    figPlot.savefig(f"{experimentName}/PSNR.png", bbox_inches='tight', dpi=300)
+
+    # Plot energy use
+    print(f"Plotting and printing energy use of architectures {names}")
+
+    legend = []
+    conversion = 3.6e6
+
+    w = 0.4
+    x = np.arange(numModels)
+
+    for name in names:
+        log = parser.parse_all_logs(log_dir=f"{experimentName}/{name}/train")
+
+        # carbontracker gives results in joules, converted here to kWh
+        trainkWh = log[0]['components']['gpu']['avg_energy_usages (J)'][0][0] / conversion
+        testkWh = log[0]['components']['gpu']['avg_energy_usages (J)'][1][0] / conversion
+
+        trainEnergies.append(trainkWh)
+        testEnergies.append(testkWh)
+    
+    for i, name in enumerate(names, 0):
+        legend.append(f"[{trainEnergies[i]:.2E} kWh] {name} Training")
+        
+    for i, name in enumerate(names, 0):
+        legend.append(f"[{testEnergies[i]:.2E} kWh] {name} Testing")
+
+    figEnergy = plt.figure(figsize=(8,8))
+    plt.title(f"Energy Use per Architecture")
+    plt.ylabel("Energy use (kWh)")
+
+    plt.bar(x - w/2, trainEnergies, w, label=names, color=col1)
+    plt.bar(x + w/2, testEnergies, w, label=names, color=col2)
+
+    plt.xticks(x, names)
+
+    plt.legend(legend)
+
+    figEnergy.savefig(f"{experimentName}/Energy_use.png", bbox_inches='tight', dpi=300)
+
+    # Plot compute times
+    print(f"Plotting and printing training compute time of models {names}")
+
+    trainTimes = np.array(trainTimes) / 60
+    testTimes = np.array(testTimes) / 60
+
+    legend = []
+
+    for name in names:
+        legend.append(f"[{trainTimes[-1]:.2f} min] {name} Training")
+
+    for name in names:
+        legend.append(f"[{testTimes[-1]:.2f} min] {name} Testing")
+
+    figCompute = plt.figure(figsize=(8,8))
+    plt.title(f"Compute Time per Architecture")
+    plt.ylabel("Compute time (min)")
+
+    plt.bar(x - w/2, trainTimes, w, label=names, color=col1)
+    plt.bar(x + w/2, testTimes, w, label=names, color=col2)
+
+    plt.xticks(x, names)
+
+    plt.legend(legend)
+
+    figCompute.savefig(f"{experimentName}/Compute_time.png", bbox_inches='tight', dpi=300)
 
 if __name__ == '__main__':
     main()

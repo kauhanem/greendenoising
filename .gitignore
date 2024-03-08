@@ -1,6 +1,7 @@
 # Random stuff
 *.pth
 *test.py
+experiment*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

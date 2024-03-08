@@ -7,18 +7,18 @@ class ONN(nn.Module):
 
         bias = True
 
-        model_head = nn.Sequential(
+        head = nn.Sequential(
             SelfONN2d(in_channels=in_nc, out_channels=nc, kernel_size=3, stride=1, padding=1, bias=bias),
             nn.ReLU(inplace=True)
         )
 
-        model_tail = nn.Sequential(
+        tail = nn.Sequential(
             SelfONN2d(in_channels=nc, out_channels=out_nc, kernel_size=3, stride=1, padding=1, bias=bias)
         )
 
         self.model = nn.Sequential(
-            model_head,
-            model_tail
+            head,
+            tail
         )
         
     def forward(self, x):
